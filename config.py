@@ -1,6 +1,6 @@
 # Единственный файл, который нужно заполнить вручную.
-BOT_TOKEN = "PASTE_BOT_TOKEN_HERE"
-ADMIN_IDS = [123456789]
+BOT_TOKEN = "8390324853:AAH7ae22fza-EE25db1NHNCflmrZyoHRoFs"
+ADMIN_IDS = [8504594395]
 
 # Оставьте None для Render: приложение попробует DATABASE_URL из окружения.
 # Если хотите указать строку локально — вставьте её сюда.
