@@ -3,6 +3,7 @@ from datetime import datetime,timezone,timedelta
 from decimal import Decimal
 from aiohttp import web
 from aiogram import Bot,Dispatcher,Router,F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart,Command
 from aiogram.types import Message,CallbackQuery,InlineKeyboardButton,InlineKeyboardMarkup
 from sqlalchemy import String,Integer,Boolean,DateTime,Text,Numeric,select,func
@@ -325,5 +326,31 @@ async def monitor(bot):
   await asyncio.sleep(86400)
 async def health(x):return web.Response(text="OK")
 async def run():
- bot=Bot(TOKEN,parse_mode="HTML");dp=Dispatcher();dp.include_router(r);app=web.Application();app.router.add_get("/",health);app.router.add_get("/health",health);runr=web.AppRunner(app);await runr.setup();await web.TCPSite(runr,"0.0.0.0",int(os.getenv("PORT","10000"))).start();asyncio.create_task(monitor(bot));await dp.start_polling(bot)
+bot = Bot(
+    TOKEN,
+    default=DefaultBotProperties(
+        parse_mode="HTML"
+    )
+)
+
+dp = Dispatcher()
+dp.include_router(r)
+
+app = web.Application()
+
+app.router.add_get("/", health)
+app.router.add_get("/health", health)
+
+runr = web.AppRunner(app)
+await runr.setup()
+
+await web.TCPSite(
+    runr,
+    "0.0.0.0",
+    int(os.getenv("PORT", "10000"))
+).start()
+
+asyncio.create_task(monitor(bot))
+
+await dp.start_polling(bot)
 if __name__=="__main__":asyncio.run(run())
