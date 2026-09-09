@@ -5,7 +5,7 @@ from aiohttp import web
 from aiogram import Bot,Dispatcher,Router,F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart,Command
-from aiogram.types import Message,CallbackQuery,InlineKeyboardButton,InlineKeyboardMarkup,ChatJoinRequest
+from aiogram.types import Message,CallbackQuery,InlineKeyboardButton,InlineKeyboardMarkup
 from sqlalchemy import String,Integer,BigInteger,Boolean,DateTime,Text,Numeric,select,func,text
 from sqlalchemy.ext.asyncio import create_async_engine,async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase,Mapped,mapped_column
@@ -31,33 +31,26 @@ class Withdrawal(B):__tablename__="withdrawals";id:Mapped[int]=mapped_column(Int
 class Ticket(B):__tablename__="tickets";id:Mapped[int]=mapped_column(Integer,primary_key=True);user_id:Mapped[int]=mapped_column(BigInteger);status:Mapped[str]=mapped_column(String(20),default="open");created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class TM(B):__tablename__="ticket_messages";id:Mapped[int]=mapped_column(Integer,primary_key=True);ticket_id:Mapped[int]=mapped_column(Integer);sender_id:Mapped[int]=mapped_column(BigInteger);text:Mapped[str]=mapped_column(Text);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Setting(B):__tablename__="settings";key:Mapped[str]=mapped_column(String(100),primary_key=True);value:Mapped[str]=mapped_column(Text)
-class JoinRequest(B):
- __tablename__="join_requests";user_id:Mapped[int]=mapped_column(BigInteger,primary_key=True);channel_key:Mapped[str]=mapped_column(String(50),primary_key=True);requested_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));active:Mapped[bool]=mapped_column(Boolean,default=True)
 class Media(B):__tablename__="media";key:Mapped[str]=mapped_column(String(100),primary_key=True);file_id:Mapped[str]=mapped_column(String(255))
 class State(B):__tablename__="states";user_id:Mapped[int]=mapped_column(BigInteger,primary_key=True);action:Mapped[str]=mapped_column(String(50),default="");data:Mapped[str]=mapped_column(Text,default="")
 class Notice(B):
  __tablename__="notices";id:Mapped[int]=mapped_column(Integer,primary_key=True);position:Mapped[int]=mapped_column(Integer,default=0);text:Mapped[str]=mapped_column(Text);enabled:Mapped[bool]=mapped_column(Boolean,default=True)
 async def public_url(s): return await st(s,"public_url","")
-async def private_url_1(s): return await st(s,"private_url_1",await st(s,"private_url",""))
-async def private_url_2(s): return await st(s,"private_url_2","")
+async def private_url(s): return await st(s,"private_url","")
 async def public_channel(s): return await st(s,"public_channel","")
-
 async def join_kb(s):
- pu=await public_url(s); pr1=await private_url_1(s); pr2=await private_url_2(s)
- rows=[]
- if pu: rows.append([("📢 Публичный канал",pu)])
- if pr1: rows.append([("🔒 Частный канал №1",pr1)])
- if pr2: rows.append([("🔒 Частный канал №2",pr2)])
- rows.append([("✅ Проверить подписку","check")])
- return kb(*rows)
-
+    # Only the public channel is mandatory.
+    # Private channels are intentionally NOT checked because the bot has no access to them.
+    pu = await public_url(s)
+    rows = []
+    if pu:
+        rows.append([("📢 Подписаться на канал", pu)])
+    rows.append([("✅ Я подписался", "check")])
+    return kb(*rows)
 def kb(*rows):
     keyboard = []
     for row in rows:
         buttons = []
-        # Accept both [(text, data), ...] and ["🔙 Админ-панель","a:admin"]
-        if len(row) == 2 and all(isinstance(v, str) for v in row):
-            row = [tuple(row)]
         for x, y in row:
             if isinstance(y, str) and y.startswith(("http://", "https://", "tg://")):
                 buttons.append(InlineKeyboardButton(text=x, url=y))
@@ -67,6 +60,7 @@ def kb(*rows):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 async def replace_message(c: CallbackQuery, text: str, **kwargs):
+    """Показывает новый экран и удаляет предыдущее сообщение бота."""
     try:
         await c.answer()
     except Exception:
@@ -78,7 +72,58 @@ async def replace_message(c: CallbackQuery, text: str, **kwargs):
         pass
     return await c.bot.send_message(chat_id, text, **kwargs)
 
+async def st(s,k,d=""):
+ x=await s.get(Setting,k);return x.value if x else d
+async def setst(s,k,v):
+ x=await s.get(Setting,k)
+ if x:x.value=v
+ else:s.add(Setting(key=k,value=v))
+async def state(s,u,a=None,d=None):
+ x=await s.get(State,u)
+ if not x:x=State(user_id=u);s.add(x)
+ if a is not None:x.action=a;x.data=d or ""
+ return x
+async def ledger(s,u,a,k,d):s.add(Ledger(user_id=u,amount=a,kind=k,description=d))
+async def role(uid,p):
+ if uid in SUPER:return True
+ async with S() as s:x=await s.get(Admin,uid);return bool(x and (p in PERMS.get(x.role,set()) or "all" in PERMS.get(x.role,set())))
+async def sub(bot,uid):
+    # Check ONLY the public channel. Private channels are deliberately skipped.
+    async with S() as s:
+        channel = (await public_channel(s)).strip()
+
+    if not channel:
+        # If the public channel ID/username is not configured, do not block users.
+        return True
+
+    # Accept @username, t.me/username, or numeric Telegram channel ID.
+    if channel.startswith("https://t.me/"):
+        channel = "@" + channel.rstrip("/").split("/")[-1].split("?")[0]
+    elif channel.startswith("http://t.me/"):
+        channel = "@" + channel.rstrip("/").split("/")[-1].split("?")[0]
+    elif channel.startswith("t.me/"):
+        channel = "@" + channel.rstrip("/").split("/")[-1].split("?")[0]
+    elif channel.startswith("https://telegram.me/"):
+        channel = "@" + channel.rstrip("/").split("/")[-1].split("?")[0]
+    elif channel.startswith("telegram.me/"):
+        channel = "@" + channel.rstrip("/").split("/")[-1].split("?")[0]
+
+    try:
+        member = await bot.get_chat_member(channel, uid)
+        return member.status in ("creator", "administrator", "member", "restricted")
+    except Exception:
+        logging.exception("Public channel subscription check failed for channel=%r user=%s", channel, uid)
+        return False
+async def access(c,bot):
+ async with S() as s:u=await s.get(User,c.from_user.id)
+ if not u or u.blocked or not u.captcha_ok or not await sub(bot,c.from_user.id):
+  async with S() as s:
+   markup = await join_kb(s)
+  await replace_message(c, "⚠️ Нет доступа. Подпишитесь на публичный канал и нажмите «Я подписался».", reply_markup=markup)
+  return False
+ return True
 async def send_screen(c: CallbackQuery, text: str, media_key: str | None = None, **kwargs):
+    """Удаляет предыдущий экран и отправляет новый текст или фото с подписью."""
     try:
         await c.answer()
     except Exception:
@@ -94,74 +139,17 @@ async def send_screen(c: CallbackQuery, text: str, media_key: str | None = None,
             return await c.bot.send_photo(c.message.chat.id, pic.file_id, caption=text, **kwargs)
     return await c.bot.send_message(c.message.chat.id, text, **kwargs)
 
-async def st(s,k,d=""):
-    x=await s.get(Setting,k);return x.value if x else d
-
-async def setst(s,k,v):
-    x=await s.get(Setting,k)
-    if x:x.value=v
-    else:s.add(Setting(key=k,value=v))
-
-async def state(s,u,a=None,d=None):
-    x=await s.get(State,u)
-    if not x:x=State(user_id=u);s.add(x)
-    if a is not None:x.action=a;x.data=d or ""
-    return x
-
-async def ledger(s,u,a,k,d):
-    s.add(Ledger(user_id=u,amount=a,kind=k,description=d))
-
-async def role(uid,p):
-    if uid in SUPER:return True
-    async with S() as s:
-        x=await s.get(Admin,uid)
-        return bool(x and (p in PERMS.get(x.role,set()) or "all" in PERMS.get(x.role,set())))
-
-async def channel_member(bot, channel, uid):
-    if not channel:return False
-    try:
-        member=await bot.get_chat_member(channel,uid)
-        return member.status not in ("left","kicked")
-    except Exception:
-        return False
-
-async def channel_request_exists(s, uid, key):
-    x=await s.get(JoinRequest, {"user_id":uid,"channel_key":key})
-    return bool(x and x.active)
-
-async def required_channels_ok(bot, uid):
-    async with S() as s:
-        public=await public_channel(s)
-        p1=await st(s,"private_channel_1","")
-        # Обязательны только публичный канал и частный канал №1.
-        # Частный канал №2 существует, но бот не имеет к нему доступа и поэтому
-        # намеренно НЕ проверяет ни подписку, ни заявку на вступление в него.
-        ok_public=await channel_member(bot,public,uid) if public else True
-        ok1=(await channel_member(bot,p1,uid) or await channel_request_exists(s,uid,"private1")) if p1 else await channel_request_exists(s,uid,"private1")
-        return ok_public and ok1
-
-async def access(c,bot):
-    async with S() as s:u=await s.get(User,c.from_user.id)
-    if not u or u.blocked or not u.captcha_ok or not await required_channels_ok(bot,c.from_user.id):
-        async with S() as s: markup=await join_kb(s)
-        await replace_message(c, "⚠️ Нет доступа.\n\nПодпишитесь на публичный канал и подайте заявку на вступление в обязательный частный канал №1, затем нажмите «Проверить подписку». Частный канал №2 не проверяется.", reply_markup=markup)
-        return False
-    return True
-
 async def menu(target):
+    """Главное меню с поддержкой фото photo:menu."""
     async with S() as s:
         title = await st(s, "text:menu", "🏠 <b>Главное меню</b>")
         pic = await s.get(Media, "photo:menu")
-        payout_url = await st(s,"payout_url","")
-    markup = kb([("💰 Баланс","bal"),("👥 Рефералы","refs")],
-                [("🔗 Моя ссылка","link"),("💸 Выплаты",payout_url or "wd")],
-                [("🆘 Поддержка","sup"),("ℹ️ Информация","info")])
+    markup = kb([("💰 Баланс","bal"),("👥 Рефералы","refs")],[("🔗 Моя ссылка","link"),("🆘 Поддержка","sup")],[("ℹ️ Информация","info")])
     if isinstance(target, CallbackQuery):
         return await send_screen(target, title, "menu", reply_markup=markup)
     if pic:
         return await target.answer_photo(pic.file_id, caption=title, reply_markup=markup)
     return await target.answer(title, reply_markup=markup)
-
 @r.message(CommandStart())
 async def start(m:Message,bot:Bot):
  p=m.text.split();ref=int(p[1][4:]) if len(p)>1 and p[1].startswith("ref_") and p[1][4:].isdigit() else None
@@ -169,7 +157,7 @@ async def start(m:Message,bot:Bot):
   u=await s.get(User,m.from_user.id)
   if not u:s.add(User(id=m.from_user.id,username=m.from_user.username,referrer_id=ref if ref!=m.from_user.id else None));await s.commit();u=await s.get(User,m.from_user.id)
   if u.blocked:await m.answer("⛔ Доступ заблокирован.");return
-  if u.captcha_ok and await required_channels_ok(bot,u.id):u.verified=True;await s.commit();await menu(m);return
+  if u.captcha_ok and await sub(bot,u.id):u.verified=True;await s.commit();await menu(m);return
  word,ok,other=random.choice([("солнце","☀️",["🌙","🍎"]),("яблоко","🍎",["🐟","🚗"]),("рыба","🐟",["🌳","⭐"])])
  z=[ok,*other];random.shuffle(z);await m.answer(f"🧩 Выберите эмодзи для слова <b>{word}</b>",reply_markup=kb(*[[(x,f"cap:{ok}:{x}") for x in z]]))
 @r.callback_query(F.data.startswith("cap:"))
@@ -179,48 +167,24 @@ async def cap(c:CallbackQuery):
  async with S() as s:u=await s.get(User,c.from_user.id);u.captcha_ok=True;await s.commit()
  async with S() as s:
   markup = await join_kb(s)
- await replace_message(c, "Подпишитесь на каналы и затем нажмите «Я подписался».", reply_markup=markup)
+ await replace_message(c, "Подпишитесь на публичный канал и затем нажмите «Я подписался».", reply_markup=markup)
 @r.callback_query(F.data=="check")
 async def check(c:CallbackQuery,bot:Bot):
-    if not await required_channels_ok(bot,c.from_user.id):
-        await c.answer("Не выполнены все условия подписки/заявок.",show_alert=True)
+    # Only public channel is checked here. Private channels are skipped.
+    if not await sub(bot,c.from_user.id):
+        await c.answer("Подписка на публичный канал не найдена.", show_alert=True)
         return
     async with S() as s:
-        u=await s.get(User,c.from_user.id)
-        first=not u.verified
-        u.verified=True
-        if first and u.referrer_id and await s.get(User,u.referrer_id):
-            existing=await s.scalar(select(Reward).where(Reward.referral_id==u.id))
-            if not existing:
-                s.add(Reward(referrer_id=u.referrer_id,referral_id=u.id,amount=50,status="hold",
-                             hold_until=datetime.now(timezone.utc)+timedelta(hours=30)))
-            elif existing.status=="cancelled":
-                existing.status="hold";existing.hold_until=datetime.now(timezone.utc)+timedelta(hours=30)
-                existing.last_ok=True
-        await s.commit()
-    async with S() as s:
-        n=await s.scalar(select(Notice).where(Notice.enabled==True).order_by(Notice.position,Notice.id))
-        if n:
-            await state(s,c.from_user.id,"notice",str(n.position));await s.commit()
-            await replace_message(c, n.text,reply_markup=kb([("➡️ Дальше","notice_next")]))
-            return
-    await menu(c)
-
-@r.chat_join_request()
-async def join_request(req:ChatJoinRequest):
-    # Заявка учитывается только для обязательного частного канала №1.
-    # Частный канал №2 бот не проверяет, поскольку доступа к нему нет.
-    async with S() as s:
-        p1=await st(s,"private_channel_1","")
-        key="private1" if str(req.chat.id)==str(p1) else None
-        if key:
-            x=await s.get(JoinRequest, {"user_id":req.from_user.id,"channel_key":key})
-            if x:
-                x.active=True;x.requested_at=datetime.now(timezone.utc)
-            else:
-                s.add(JoinRequest(user_id=req.from_user.id,channel_key=key,active=True))
-            await s.commit()
-
+  u=await s.get(User,c.from_user.id);first=not u.verified;u.verified=True
+  if first and u.referrer_id and await s.get(User,u.referrer_id):s.add(Reward(referrer_id=u.referrer_id,referral_id=u.id,amount=50,status="hold",hold_until=datetime.now(timezone.utc)+timedelta(hours=30)))
+  await s.commit()
+ async with S() as s:
+  n=await s.scalar(select(Notice).where(Notice.enabled==True).order_by(Notice.position,Notice.id))
+  if n:
+   await state(s,c.from_user.id,"notice",str(n.position));await s.commit()
+   await replace_message(c, n.text,reply_markup=kb([("➡️ Дальше","notice_next")]))
+   return
+ await menu(c)
 @r.callback_query(F.data=="notice_next")
 async def notice_next(c:CallbackQuery):
  async with S() as s:
@@ -277,14 +241,6 @@ async def photo(m:Message):
  if not await role(m.from_user.id,"content"):return
  async with S() as s:
   x=await s.get(State,m.from_user.id)
-  if x and x.action=="broadcast":
-   await state(s,m.from_user.id,"",""); await s.commit()
-   users=(await s.scalars(select(User.id).where(User.blocked==False))).all(); sent=failed=0
-   for uid in users:
-    try: await m.bot.copy_message(uid,m.chat.id,m.message_id); sent+=1
-    except Exception: failed+=1
-    await asyncio.sleep(0.04)
-   await m.answer(f"📢 Рассылка завершена. Отправлено: {sent}, не доставлено: {failed}"); return
   if not x or x.action!="photo":return
   key=(m.caption or "").strip()
   if key not in ("menu","info","refs","link","sup","bal"):await m.answer("Подпись: menu, info, refs, link, sup или bal");return
@@ -296,21 +252,6 @@ async def photo(m:Message):
 @r.message(F.text & ~F.text.startswith("/"))
 async def on_text(m:Message):
  async with S() as s:
-  x=await s.get(State,m.from_user.id)
-  if x and x.action=="config_value":
-   if m.from_user.id not in SUPER: return
-   await setst(s,x.data,m.text.strip()); await state(s,m.from_user.id,"",""); await s.commit(); await m.answer("✅ Сохранено."); return
-  if x and x.action=="broadcast":
-   await state(s,m.from_user.id,"",""); await s.commit()
-   users=(await s.scalars(select(User.id).where(User.blocked==False))).all()
-   sent=failed=0
-   for uid in users:
-    try:
-     await m.bot.copy_message(uid,m.chat.id,m.message_id); sent+=1
-    except Exception: failed+=1
-    await asyncio.sleep(0.04)
-   await m.answer(f"📢 Рассылка завершена.\nОтправлено: {sent}\nНе доставлено: {failed}")
-   return
   x=await s.get(State,m.from_user.id)
   if x and x.action=="edit_text":
    key=x.data
@@ -344,7 +285,7 @@ async def on_text(m:Message):
 @r.message(Command("admin"))
 async def admin(m:Message):
  if m.from_user.id not in SUPER and not any([await role(m.from_user.id,p) for p in ["user","ticket","payout","content"]]):return
- await m.answer("🛠 <b>АДМИН-ПАНЕЛЬ</b>",reply_markup=kb([("📊 Статистика","a:stats"),("👤 Пользователь","a:user")],[("👥 Все пользователи","a:users:0")],[("💸 Выплаты","a:payout"),("📢 Рассылка","a:broadcast")],[("🖼 Фото","a:photo"),("⚙️ Каналы/ссылки","a:config")],
+ await m.answer("🛠 <b>АДМИН-ПАНЕЛЬ</b>",reply_markup=kb([("👤 Пользователь","a:user"),("👥 Все пользователи","a:users:0")],[("💸 Выплаты","a:payout"),("🆘 Тикеты","a:tickets")],[("🖼 Фото","a:photo"),("⚙️ Каналы/ссылки","a:config")],
         [("📝 Тексты","a:texts")],
         [("⚠️ Важные сообщения","a:notices"),("🔓 Открыть","a:open"),("🔒 Закрыть","a:close")]))
 @r.callback_query(F.data=="a:texts")
@@ -370,7 +311,7 @@ async def atext_pick(c:CallbackQuery):
 @r.callback_query(F.data=="a:admin")
 async def admin_back(c:CallbackQuery):
  if c.from_user.id not in SUPER and not any([await role(c.from_user.id,p) for p in ["user","ticket","payout","content"]]):return
- await replace_message(c, "🛠 <b>АДМИН-ПАНЕЛЬ</b>",reply_markup=kb([("📊 Статистика","a:stats"),("👤 Пользователь","a:user")],[("👥 Все пользователи","a:users:0")],[("💸 Выплаты","a:payout"),("📢 Рассылка","a:broadcast")],[("🖼 Фото","a:photo"),("⚙️ Каналы/ссылки","a:config")],
+ await replace_message(c, "🛠 <b>АДМИН-ПАНЕЛЬ</b>",reply_markup=kb([("👤 Пользователь","a:user"),("👥 Все пользователи","a:users:0")],[("💸 Выплаты","a:payout"),("🆘 Тикеты","a:tickets")],[("🖼 Фото","a:photo"),("⚙️ Каналы/ссылки","a:config")],
         [("📝 Тексты","a:texts")],
         [("⚠️ Важные сообщения","a:notices"),("🔓 Открыть","a:open"),("🔒 Закрыть","a:close")]))
 
@@ -555,72 +496,19 @@ async def toggle(c:CallbackQuery):
  if not await role(c.from_user.id,"payout"):return
  async with S() as s:await setst(s,"payout_manual","open" if c.data=="a:open" else "closed");await s.commit()
  await replace_message(c, "Настройка выплат сохранена.")
-@r.callback_query(F.data=="a:stats")
-async def astats(c:CallbackQuery):
-    if not await role(c.from_user.id,"user"): return
-    async with S() as s:
-        total_users=await s.scalar(select(func.count()).select_from(User)) or 0
-        total_balance=await s.scalar(select(func.coalesce(func.sum(User.balance),0)).select_from(User)) or 0
-        total_hold=await s.scalar(select(func.coalesce(func.sum(Reward.amount),0)).where(Reward.status=="hold")) or 0
-        total_to_pay=await s.scalar(select(func.coalesce(func.sum(Withdrawal.amount),0)).where(Withdrawal.status=="pending")) or 0
-        total_refs=await s.scalar(select(func.count()).select_from(Reward).where(Reward.status.in_(["hold","eligible"]))) or 0
-    await replace_message(c,
-        f"📊 <b>Общая статистика</b>\n\n"
-        f"👤 Пользователей: <b>{total_users}</b>\n"
-        f"👥 Активных рефералов: <b>{total_refs}</b>\n"
-        f"💰 На балансах: <b>{total_balance} ₽</b>\n"
-        f"⏳ В холде: <b>{total_hold} ₽</b>\n"
-        f"💸 Нужно выплатить: <b>{total_to_pay} ₽</b>",
-        reply_markup=kb([("🔙 Админ-панель","a:admin")]))
-
-@r.callback_query(F.data=="a:broadcast")
-async def abroadcast(c:CallbackQuery):
-    if not await role(c.from_user.id,"content"): return
-    async with S() as s:
-        await state(s,c.from_user.id,"broadcast","")
-        await s.commit()
-    await replace_message(c,"📢 Отправьте одним сообщением то, что нужно разослать всем пользователям.\nМожно использовать текст, фото, видео, документ и другие типы сообщений.")
-
 @r.callback_query(F.data=="a:config")
 async def aconfig(c:CallbackQuery):
-    if c.from_user.id not in SUPER:return
-    async with S() as s:
-        pc=await public_channel(s); pu=await public_url(s)
-        p1=await st(s,"private_channel_1",""); p1u=await private_url_1(s)
-        p2=await st(s,"private_channel_2",""); p2u=await private_url_2(s)
-        payout=await st(s,"payout_url","")
-    await replace_message(c,
-        "⚙️ <b>Каналы и ссылки</b>\n\n"
-        f"📢 Публичный канал: <code>{pc or '—'}</code>\n🔗 {pu or '—'}\n\n"
-        f"🔒 Частный №1: <code>{p1 or '—'}</code>\n🔗 {p1u or '—'}\n\n"
-        f"🔒 Частный №2 (не проверяется): <code>{p2 or '—'}</code>\n🔗 {p2u or '—'}\n\n"
-        f"💸 Выплаты: {payout or '—'}\n\n"
-        "Выберите, что изменить:",
-        reply_markup=kb(
-            [("📢 ID публичного","a:setcfg:public_channel"),("🔗 Ссылка публичного","a:setcfg:public_url")],
-            [("🔒 ID частного №1","a:setcfg:private_channel_1"),("🔗 Ссылка №1","a:setcfg:private_url_1")],
-            [("🔒 ID частного №2","a:setcfg:private_channel_2"),("🔗 Ссылка №2","a:setcfg:private_url_2")],
-            [("💸 Ссылка выплат","a:setcfg:payout_url")],
-            [("🔙 Админ-панель","a:admin")
-        ]))
-
-@r.callback_query(F.data.startswith("a:setcfg:"))
-async def setcfg_pick(c:CallbackQuery):
-    if c.from_user.id not in SUPER:return
-    key=c.data.split(":",2)[2]
-    labels={
-        "public_channel":"ID публичного канала (например -1001234567890)",
-        "public_url":"ссылку публичного канала",
-        "private_channel_1":"ID частного канала №1 (например -1001234567890)",
-        "private_url_1":"ссылку частного канала №1",
-        "private_channel_2":"ID частного канала №2 (например -1001234567890)",
-        "private_url_2":"ссылку частного канала №2",
-        "payout_url":"ссылку публичного канала выплат",
-    }
-    async with S() as s:
-        await state(s,c.from_user.id,"config_value",key);await s.commit()
-    await replace_message(c,f"Отправьте {labels.get(key,key)} одним сообщением.")
-
+ if c.from_user.id not in SUPER:return
+ await replace_message(c, "Настройка публичного канала:\n/config public_channel @channel\n/config public_url https://t.me/...\n\nПриватные каналы не проверяются.\n/config captcha_text Текст")
+@r.message(Command("config"))
+async def configcmd(m:Message):
+ if m.from_user.id not in SUPER:return
+ try:_,key,value=m.text.split(maxsplit=2)
+ except:await m.answer("Формат: /config ключ значение");return
+ allowed={"public_channel","public_url","captcha_text"}
+ if key not in allowed:await m.answer("Недопустимый ключ.");return
+ async with S() as s:await setst(s,key,value);await s.commit()
+ await m.answer("Сохранено в PostgreSQL.")
 @r.callback_query(F.data=="a:notices")
 async def anotices(c:CallbackQuery):
  if not await role(c.from_user.id,"content"):return
@@ -664,59 +552,18 @@ async def content(c:CallbackQuery,bot:Bot):
   except Exception: pass
   await c.bot.send_photo(c.message.chat.id, pic.file_id, caption=txt, reply_markup=kb([("⬅️ Назад","home")]))
  else:await replace_message(c, txt, reply_markup=kb([("⬅️ Назад","home")]))
-async def process_referral_state(s, bot, rw, now):
-    ok = await required_channels_ok(bot, rw.referral_id)
-    rw.last_ok = ok
-    u = await s.get(User, rw.referrer_id)
-    if not ok:
-        if rw.status in ("hold","eligible"):
-            # Remove currently credited reward only once. Cancelled rewards can
-            # later be reactivated with a brand-new hold.
-            if rw.status=="eligible" and u:
-                u.balance -= rw.amount
-                await ledger(s,u.id,-rw.amount,"referral_unsubscribed",
-                             f"Реферал {rw.referral_id} отписался/не выполнил условия")
-            rw.status="cancelled"
-        return
-    if rw.status=="cancelled":
-        rw.status="hold"
-        rw.hold_until=now+timedelta(hours=30)
-        rw.last_ok=True
-        return
-    if rw.status=="hold" and now>=rw.hold_until and u:
-        rw.status="eligible"
-        u.balance += rw.amount
-        await ledger(s,u.id,rw.amount,"referral","Подтверждённый реферал")
-
 async def monitor(bot):
-    while True:
-        try:
-            async with S() as s:
-                rows=(await s.scalars(select(Reward).where(Reward.status.in_(["hold","eligible","cancelled"])))).all()
-                now=datetime.now(timezone.utc)
-                for q in rows:
-                    await process_referral_state(s,bot,q,now)
-                await s.commit()
-        except Exception:
-            logging.exception("monitor")
-        await asyncio.sleep(300)
-
-
-@r.message()
-async def broadcast_other(m:Message):
-    async with S() as s:
-        x=await s.get(State,m.from_user.id)
-        if not x or x.action!="broadcast": return
-        await state(s,m.from_user.id,"",""); await s.commit()
-        users=(await s.scalars(select(User.id).where(User.blocked==False))).all()
-    sent=failed=0
-    for uid in users:
-        try:
-            await m.bot.copy_message(uid,m.chat.id,m.message_id); sent+=1
-        except Exception: failed+=1
-        await asyncio.sleep(0.04)
-    await m.answer(f"📢 Рассылка завершена. Отправлено: {sent}, не доставлено: {failed}")
-
+ while True:
+  try:
+   async with S() as s:
+    rows=(await s.scalars(select(Reward).where(Reward.status.in_(["hold","eligible"])))).all();now=datetime.now(timezone.utc)
+    for q in rows:
+     ok=await sub(bot,q.referral_id);q.last_ok=ok
+     if not ok:q.status="cancelled"
+     elif q.status=="hold" and now>=q.hold_until:q.status="eligible";u=await s.get(User,q.referrer_id);u.balance+=q.amount;await ledger(s,u.id,q.amount,"referral","Подтверждённый реферал")
+    await s.commit()
+  except Exception:logging.exception("monitor")
+  await asyncio.sleep(86400)
 async def migrate_bigint_columns(conn):
     # Safe PostgreSQL migration for Telegram IDs. Existing INTEGER columns are
     # upgraded before inserting any modern Telegram ID (> 2,147,483,647).
